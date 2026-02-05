@@ -17,7 +17,7 @@ pcpaneld-core = { path = "../pcpaneld-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 hidapi = { version = "2", default-features = false, features = ["linux-native"] }
-ksni = "0.2"
+ksni = "0.3"
 libc = "0.2"
 libpulse-binding = "2"
 notify = "7"
