@@ -27,9 +27,8 @@ pub fn run(log_level: &str) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     let result = rt.block_on(async_main(config, config_path));
-    // Explicit shutdown with timeout: ksni's TrayService::run() blocks forever on a
-    // spawn_blocking thread and provides no shutdown mechanism. The default runtime
-    // drop would wait for it indefinitely.
+    // Explicit shutdown with timeout: HID, PulseAudio, and udev threads use blocking
+    // APIs. The default runtime drop would wait for them indefinitely.
     rt.shutdown_timeout(std::time::Duration::from_secs(1));
     result
 }

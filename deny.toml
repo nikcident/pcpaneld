@@ -1,12 +1,4 @@
 [advisories]
-ignore = [
-    # Transitive deps of ksni (pulls in clap v2 via dbus-codegen build dep).
-    # No upgrade available; ksni is the only viable StatusNotifierItem crate.
-    { id = "RUSTSEC-2021-0139", reason = "ansi_term: transitive via ksni -> dbus-codegen -> clap v2" },
-    { id = "RUSTSEC-2024-0375", reason = "atty: transitive via ksni -> dbus-codegen -> clap v2" },
-    # Transitive dep of notify via notify-types. No upgrade available.
-    { id = "RUSTSEC-2024-0384", reason = "instant: transitive via notify -> notify-types" },
-]
 
 [licenses]
 allow = [
