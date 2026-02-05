@@ -1,0 +1,20 @@
+[package]
+name = "pcpaneld-core"
+description = "Core library for PCPanel Pro protocol and configuration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dirs = "6"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml_edit = { version = "0.22", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

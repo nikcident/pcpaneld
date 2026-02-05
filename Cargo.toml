@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/pcpaneld-core", "crates/pcpaneld"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["nikcident"]
+description = "Native Linux daemon for PCPanel Pro USB audio mixer"
+repository = "https://github.com/nikcident/pcpaneld"
+rust-version = "1.93"

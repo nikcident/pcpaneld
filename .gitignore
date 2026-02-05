@@ -1,0 +1,20 @@
+/target
+future_features/
+.claude/
+.act-logs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Secrets
+*.pem
+*.key
+.env
+.env.*

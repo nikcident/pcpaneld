@@ -1,0 +1,12 @@
+[Unit]
+Description=PCPanel Pro Daemon
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStart=%h/.cargo/bin/pcpaneld daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
