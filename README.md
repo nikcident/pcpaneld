@@ -119,6 +119,7 @@ All commands communicate with the running daemon over a Unix socket.
 
 | Command | Description |
 |---------|-------------|
+| `pcpaneld --version` | Print version |
 | `pcpaneld info` | Show device connection, PulseAudio status, and control mappings |
 | `pcpaneld apps` | List running audio applications with their binary names and Flatpak IDs |
 | `pcpaneld devices` | List audio devices (outputs and inputs) |

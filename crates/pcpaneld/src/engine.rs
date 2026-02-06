@@ -284,6 +284,10 @@ pub async fn run(
                         state.last_applied_volumes = [None; 9];
                         send_initial_leds(&hid_cmd_tx, &state.config.leds).await;
                         info!("config reloaded successfully");
+                        match state.config.to_toml() {
+                            Ok(toml) => debug!("active config:\n{toml}"),
+                            Err(e) => warn!("failed to serialize config for logging: {e}"),
+                        }
                     }
                     Err(e) => {
                         warn!("config reload failed (keeping previous config): {e}");
@@ -879,6 +883,10 @@ async fn handle_ipc_request(
         IpcRequest::ReloadConfig => match Config::load(&state.config_path) {
             Ok(new_config) => {
                 state.config = new_config;
+                match state.config.to_toml() {
+                    Ok(toml) => debug!("active config:\n{toml}"),
+                    Err(e) => warn!("failed to serialize config for logging: {e}"),
+                }
                 IpcResponse::Ok
             }
             Err(e) => IpcResponse::Error {

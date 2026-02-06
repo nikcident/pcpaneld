@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-02-05
+
+### Added
+
+- Version banner and active config dump logged at startup (INFO level)
+- Config dump logged on reload (DEBUG level) for both file-watcher and IPC reloads
+- `pcpaneld --version` flag
+- justfile targets: `start`, `stop`, `restart`, `enable`, `disable`, `status`, `logs` (systemd management), `deny` (cargo-deny)
+- CLAUDE.md workflow section with branch/PR conventions
+
+### Changed
+
+- `install-udev` skips sudo when the rule file is already up to date
+
 ## [0.1.0] - 2026-02-05
 
 Initial release.

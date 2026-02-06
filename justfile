@@ -29,13 +29,46 @@ install-binaries: release
     install -Dm755 target/release/pcpaneld ~/.cargo/bin/pcpaneld
 
 install-udev:
-    sudo cp dist/70-pcpanel.rules /etc/udev/rules.d/
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src="dist/70-pcpanel.rules"
+    dst="/etc/udev/rules.d/70-pcpanel.rules"
+    if cmp -s "$src" "$dst" 2>/dev/null; then
+        echo "udev rule already up to date"
+    else
+        sudo cp "$src" "$dst"
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger
+    fi
 
 install-service:
     install -Dm644 dist/pcpaneld.service ~/.config/systemd/user/pcpaneld.service
     systemctl --user daemon-reload
+
+deny:
+    cargo deny check
+
+# Systemd user service management
+start:
+    systemctl --user start pcpaneld
+
+stop:
+    systemctl --user stop pcpaneld
+
+restart:
+    systemctl --user restart pcpaneld
+
+enable:
+    systemctl --user enable pcpaneld
+
+disable:
+    systemctl --user disable pcpaneld
+
+status:
+    systemctl --user status pcpaneld
+
+logs *args='--follow --lines=100':
+    journalctl --user-unit pcpaneld {{args}}
 
 clean:
     cargo clean
