@@ -15,6 +15,8 @@ pub fn run(log_level: &str) -> Result<()> {
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    info!("pcpaneld v{} starting", env!("CARGO_PKG_VERSION"));
+
     let config_path = Config::default_path().expect("failed to resolve XDG config directory");
     match config::bootstrap_config(&config_path) {
         Ok(true) => info!("created default config at {}", config_path.display()),
@@ -24,6 +26,10 @@ pub fn run(log_level: &str) -> Result<()> {
 
     let config = Config::load(&config_path).context("failed to load config")?;
     info!("loaded config from {}", config_path.display());
+    match config.to_toml() {
+        Ok(toml) => info!("active config:\n{toml}"),
+        Err(e) => warn!("failed to serialize config for logging: {e}"),
+    }
 
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     let result = rt.block_on(async_main(config, config_path));

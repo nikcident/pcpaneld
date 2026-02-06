@@ -40,6 +40,7 @@ just check    # clippy + fmt check (Rust-only analysis, no C linker needed)
 just build    # compile (needs C dev libs — see Development Setup)
 just test     # run tests (needs C dev libs)
 just all      # check + build + test
+just deny     # check advisories + licenses (run before PRs)
 ```
 
 Raw commands if `just` is not available:
@@ -51,6 +52,13 @@ distrobox enter pcpaneld-dev -- cargo test --workspace
 ```
 
 All four checks must pass with zero warnings before any change is considered complete.
+
+## Workflow
+
+- Branch off `main` for all changes. Use descriptive branch names (e.g., `upgrade-ksni-0.3`, `fix-slider-debounce`).
+- One logical change per PR. Keep PRs focused and reviewable.
+- `just all` must pass before opening a PR. Run `just deny` to check advisories/licenses.
+- Use `gh pr create` to open PRs against `main`.
 
 ## Rust Standards
 
@@ -129,7 +137,7 @@ If a test contains the same math as the production code, it proves nothing.
 Before considering any change complete:
 
 1. `cargo clippy --workspace -- -D warnings` and `cargo fmt --check --all` are clean
-2. `just test` passes (or `distrobox enter pcpaneld-dev -- cargo test --workspace`)
+2. `just test` passes (or `distrobox enter pcpaneld-dev -- cargo test --workspace`) and `just deny` is clean
 3. No `unwrap()` added outside of tests
 4. Error messages include enough context to diagnose without a debugger
 5. New public types derive `Debug` at minimum

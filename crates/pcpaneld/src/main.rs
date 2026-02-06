@@ -14,7 +14,11 @@ mod tray;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "pcpaneld", about = "PCPanel Pro daemon and control tool")]
+#[command(
+    name = "pcpaneld",
+    version,
+    about = "PCPanel Pro daemon and control tool"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
