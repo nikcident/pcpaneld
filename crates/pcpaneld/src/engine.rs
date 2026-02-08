@@ -402,8 +402,9 @@ async fn reapply_volumes_to_new_sink_inputs(
             }
             AudioTarget::FocusedApp => {
                 if let Some(focused) = focused_window {
+                    let focused_proc = CachedProcInfo::lookup(focused.pid, &RealProc);
                     for si in new_sink_inputs {
-                        if sink_input_matches_focused(si, focused) {
+                        if sink_input_matches_focused(si, focused, &focused_proc, &RealProc) {
                             debug!(
                                 "re-applying volume {:.2} to new focused sink-input {} (index {})",
                                 volume.get(),
@@ -572,7 +573,7 @@ fn resolve_target<'a>(
         }
         AudioTarget::FocusedApp => {
             let focused = focused_window.as_ref()?;
-            let inputs = find_focused_sink_inputs(focused, &audio_state.sink_inputs);
+            let inputs = find_focused_sink_inputs(focused, &audio_state.sink_inputs, &RealProc);
             (!inputs.is_empty()).then_some(ResolvedTarget::SinkInputs(inputs))
         }
     }
@@ -704,6 +705,100 @@ fn binary_stem(s: &str) -> &str {
         .unwrap_or(without_ext)
 }
 
+/// Abstraction over `/proc` reads for process info lookup.
+///
+/// Enables tests to mock the kernel interface without touching real `/proc`.
+trait ProcInfo {
+    fn parent_pid(&self, pid: u32) -> Option<u32>;
+    fn pgid(&self, pid: u32) -> Option<u32>;
+}
+
+/// Real `/proc` reader for production use (zero-sized, no allocation).
+struct RealProc;
+
+impl ProcInfo for RealProc {
+    fn parent_pid(&self, pid: u32) -> Option<u32> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        for line in status.lines() {
+            if let Some(val) = line.strip_prefix("PPid:\t") {
+                return val.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    fn pgid(&self, pid: u32) -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Field 2 is (comm) which can contain spaces and parens.
+        // Find the last ')' to safely skip it.
+        let after_comm = stat.get(stat.rfind(')')? + 2..)?;
+        // Fields after comm: state(3) ppid(4) pgrp(5) ...
+        after_comm.split_whitespace().nth(2)?.parse().ok()
+    }
+}
+
+/// Pre-computed `/proc` info for the focused window's PID, avoiding
+/// redundant reads when matching against multiple sink-inputs.
+struct CachedProcInfo {
+    pgid: Option<u32>,
+    parent_pid: Option<u32>,
+}
+
+impl CachedProcInfo {
+    fn lookup(pid: Option<u32>, proc_info: &impl ProcInfo) -> Self {
+        match pid {
+            Some(p) => Self {
+                pgid: proc_info.pgid(p),
+                parent_pid: proc_info.parent_pid(p),
+            },
+            None => Self {
+                pgid: None,
+                parent_pid: None,
+            },
+        }
+    }
+}
+
+/// PID-based matching for Wine/Proton games (strategies 6, 6a, 6b).
+///
+/// Falls through: exact PID → same process group → sibling (same parent).
+fn pid_matches_focused(
+    focused_pid: Option<u32>,
+    si_pid: Option<u32>,
+    focused_proc: &CachedProcInfo,
+    proc_info: &impl ProcInfo,
+) -> bool {
+    let (wp, sp) = match (focused_pid, si_pid) {
+        (Some(w), Some(s)) => (w, s),
+        _ => return false,
+    };
+
+    // Strategy 6: exact PID match (cheapest, no /proc reads)
+    if wp == sp {
+        return true;
+    }
+
+    // Strategy 6a: same process group — Wine/Proton games share a PGID
+    // set by Steam's reaper/pressure-vessel before launching Wine.
+    if let (Some(fpg), Some(spg)) = (focused_proc.pgid, proc_info.pgid(sp)) {
+        if fpg == spg && fpg > 0 {
+            debug!("focused match via PGID: window_pid={wp}, stream_pid={sp}, pgid={fpg}");
+            return true;
+        }
+    }
+
+    // Strategy 6b: sibling — different PIDs with the same parent.
+    // Fallback for launchers that don't set up a separate process group.
+    if let (Some(fpp), Some(spp)) = (focused_proc.parent_pid, proc_info.parent_pid(sp)) {
+        if fpp == spp && fpp > 1 {
+            debug!("focused match via sibling: window_pid={wp}, stream_pid={sp}, parent_pid={fpp}");
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Check if a single sink-input matches the currently focused window.
 ///
 /// Tries matching strategies in priority order:
@@ -712,8 +807,15 @@ fn binary_stem(s: &str) -> &str {
 /// 3. `desktopFile` stem vs `binary` stem (reverse-DNS desktop files, `-bin` binaries)
 /// 4. `desktopFile` vs sink-input `binary` (exact fallback for native apps)
 /// 5. `resourceClass` vs sink-input `binary` (another fallback)
-/// 6. Direct PID match (Wine/Proton games where binary is `wine64-preloader`)
-fn sink_input_matches_focused(si: &SinkInputInfo, focused: &FocusedWindowInfo) -> bool {
+/// 6. Exact PID match (Wine/Proton with same process)
+///    6a. Same process group (Wine/Proton with separate processes)
+///    6b. Sibling match — same parent PID (fallback for non-PGID launchers)
+fn sink_input_matches_focused(
+    si: &SinkInputInfo,
+    focused: &FocusedWindowInfo,
+    focused_proc: &CachedProcInfo,
+    proc_info: &impl ProcInfo,
+) -> bool {
     let eq_ci = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
 
     // Strategy 1: desktopFile vs flatpak_id
@@ -743,21 +845,20 @@ fn sink_input_matches_focused(si: &SinkInputInfo, focused: &FocusedWindowInfo) -
         (&focused.resource_class, &si.binary),
         (Some(rc), Some(bin)) if eq_ci(rc, bin)
     )
-    // Strategy 6: direct PID match — Wine/Proton games report a generic binary
-    // (wine64-preloader) but the window PID matches the audio stream PID.
-    || matches!(
-        (focused.pid, si.pid),
-        (Some(wp), Some(sp)) if wp == sp
-    )
+    // Strategies 6/6a/6b: PID-based matching (Wine/Proton games)
+    || pid_matches_focused(focused.pid, si.pid, focused_proc, proc_info)
 }
 
 /// Find sink-inputs that belong to the currently focused window.
 ///
-/// De-duplicates results by sink-input index so each gets at most one command.
+/// Pre-reads the focused window's `/proc` info once to avoid redundant reads
+/// when matching against multiple sink-inputs. De-duplicates by index.
 fn find_focused_sink_inputs<'a>(
     focused: &FocusedWindowInfo,
     sink_inputs: &'a [SinkInputInfo],
+    proc_info: &impl ProcInfo,
 ) -> Vec<&'a SinkInputInfo> {
+    let focused_proc = CachedProcInfo::lookup(focused.pid, proc_info);
     let mut seen = HashSet::new();
     let mut results = Vec::new();
 
@@ -766,7 +867,7 @@ fn find_focused_sink_inputs<'a>(
             continue;
         }
 
-        if sink_input_matches_focused(si, focused) {
+        if sink_input_matches_focused(si, focused, &focused_proc, proc_info) {
             seen.insert(si.index);
             results.push(si);
         }
@@ -983,6 +1084,40 @@ mod tests {
     use super::*;
     use pcpaneld_core::control::{AppMatcher, ControlConfig};
 
+    /// Mock `/proc` reader for deterministic tests.
+    struct MockProc {
+        pgids: HashMap<u32, u32>,
+        ppids: HashMap<u32, u32>,
+    }
+
+    impl MockProc {
+        /// Empty mock — all lookups return `None`.
+        fn empty() -> Self {
+            Self {
+                pgids: HashMap::new(),
+                ppids: HashMap::new(),
+            }
+        }
+    }
+
+    impl ProcInfo for MockProc {
+        fn parent_pid(&self, pid: u32) -> Option<u32> {
+            self.ppids.get(&pid).copied()
+        }
+
+        fn pgid(&self, pid: u32) -> Option<u32> {
+            self.pgids.get(&pid).copied()
+        }
+    }
+
+    /// Empty proc cache for tests that don't exercise PID-based matching.
+    fn empty_cache() -> CachedProcInfo {
+        CachedProcInfo {
+            pgid: None,
+            parent_pid: None,
+        }
+    }
+
     fn make_sink_input(
         index: u32,
         name: &str,
@@ -1024,7 +1159,7 @@ mod tests {
             Some("firefox"),
             Some("org.mozilla.firefox"),
         )];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].index, 1);
     }
@@ -1033,7 +1168,7 @@ mod tests {
     fn focused_matches_resource_name_vs_binary() {
         let focused = make_focused(None, Some("firefox"), None);
         let inputs = [make_sink_input(1, "Firefox", Some("firefox"), None)];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].index, 1);
     }
@@ -1043,7 +1178,7 @@ mod tests {
         // Native app where desktopFile matches binary name
         let focused = make_focused(Some("firefox"), None, None);
         let inputs = [make_sink_input(1, "Firefox", Some("firefox"), None)];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].index, 1);
     }
@@ -1052,7 +1187,7 @@ mod tests {
     fn focused_matches_resource_class_vs_binary_fallback() {
         let focused = make_focused(None, None, Some("Firefox"));
         let inputs = [make_sink_input(1, "Firefox", Some("firefox"), None)];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].index, 1);
     }
@@ -1061,7 +1196,7 @@ mod tests {
     fn focused_no_match_returns_empty() {
         let focused = make_focused(Some("org.gnome.Ptyxis"), Some("ptyxis"), Some("Ptyxis"));
         let inputs = [make_sink_input(1, "Firefox", Some("firefox"), None)];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert!(matched.is_empty());
     }
 
@@ -1080,7 +1215,7 @@ mod tests {
             Some("firefox"),
             Some("org.mozilla.firefox"),
         )];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 1);
     }
 
@@ -1094,27 +1229,42 @@ mod tests {
             None,
             Some("org.mozilla.firefox"),
         )];
-        assert_eq!(find_focused_sink_inputs(&focused, &inputs).len(), 1);
+        assert_eq!(
+            find_focused_sink_inputs(&focused, &inputs, &MockProc::empty()).len(),
+            1
+        );
 
         // Strategy 2: case-insensitive resourceName vs binary
         let focused = make_focused(None, Some("Firefox"), None);
         let inputs = [make_sink_input(2, "Firefox", Some("firefox"), None)];
-        assert_eq!(find_focused_sink_inputs(&focused, &inputs).len(), 1);
+        assert_eq!(
+            find_focused_sink_inputs(&focused, &inputs, &MockProc::empty()).len(),
+            1
+        );
 
         // Strategy 3: case-insensitive desktopFile stem vs binary stem
         let focused = make_focused(Some("Org.Mozilla.Firefox"), None, None);
         let inputs = [make_sink_input(3, "Firefox", Some("firefox-bin"), None)];
-        assert_eq!(find_focused_sink_inputs(&focused, &inputs).len(), 1);
+        assert_eq!(
+            find_focused_sink_inputs(&focused, &inputs, &MockProc::empty()).len(),
+            1
+        );
 
         // Strategy 4: case-insensitive desktopFile vs binary (exact)
         let focused = make_focused(Some("Firefox"), None, None);
         let inputs = [make_sink_input(4, "Firefox", Some("firefox"), None)];
-        assert_eq!(find_focused_sink_inputs(&focused, &inputs).len(), 1);
+        assert_eq!(
+            find_focused_sink_inputs(&focused, &inputs, &MockProc::empty()).len(),
+            1
+        );
 
         // Strategy 5: case-insensitive resourceClass vs binary
         let focused = make_focused(None, None, Some("FIREFOX"));
         let inputs = [make_sink_input(5, "Firefox", Some("firefox"), None)];
-        assert_eq!(find_focused_sink_inputs(&focused, &inputs).len(), 1);
+        assert_eq!(
+            find_focused_sink_inputs(&focused, &inputs, &MockProc::empty()).len(),
+            1
+        );
     }
 
     #[test]
@@ -1125,7 +1275,7 @@ mod tests {
             make_sink_input(1, "Firefox", Some("firefox"), None),
             make_sink_input(2, "Firefox - YouTube", Some("firefox"), None),
         ];
-        let matched = find_focused_sink_inputs(&focused, &inputs);
+        let matched = find_focused_sink_inputs(&focused, &inputs, &MockProc::empty());
         assert_eq!(matched.len(), 2);
     }
 
@@ -1133,78 +1283,243 @@ mod tests {
 
     #[test]
     fn sink_input_matches_focused_all_strategies() {
+        let mock = MockProc::empty();
+        let cache = empty_cache();
         let si_flatpak = make_sink_input(1, "Firefox", None, Some("org.mozilla.firefox"));
         let si_binary = make_sink_input(2, "Firefox", Some("firefox"), None);
         let si_bin_suffix = make_sink_input(3, "Firefox", Some("firefox-bin"), None);
 
         // Strategy 1: desktopFile vs flatpak_id
         let focused = make_focused(Some("org.mozilla.firefox"), None, None);
-        assert!(sink_input_matches_focused(&si_flatpak, &focused));
+        assert!(sink_input_matches_focused(
+            &si_flatpak,
+            &focused,
+            &cache,
+            &mock
+        ));
 
         // Strategy 2: resourceName vs binary
         let focused = make_focused(None, Some("firefox"), None);
-        assert!(sink_input_matches_focused(&si_binary, &focused));
+        assert!(sink_input_matches_focused(
+            &si_binary, &focused, &cache, &mock
+        ));
 
         // Strategy 3: desktopFile stem vs binary stem
         let focused = make_focused(Some("org.mozilla.firefox"), None, None);
-        assert!(sink_input_matches_focused(&si_bin_suffix, &focused));
+        assert!(sink_input_matches_focused(
+            &si_bin_suffix,
+            &focused,
+            &cache,
+            &mock
+        ));
 
         // Strategy 4: desktopFile vs binary (exact)
         let focused = make_focused(Some("firefox"), None, None);
-        assert!(sink_input_matches_focused(&si_binary, &focused));
+        assert!(sink_input_matches_focused(
+            &si_binary, &focused, &cache, &mock
+        ));
 
         // Strategy 5: resourceClass vs binary
         let focused = make_focused(None, None, Some("firefox"));
-        assert!(sink_input_matches_focused(&si_binary, &focused));
+        assert!(sink_input_matches_focused(
+            &si_binary, &focused, &cache, &mock
+        ));
     }
 
-    // --- PID matching (strategy 6) tests ---
+    // --- PID matching (strategies 6/6a/6b) tests ---
 
     #[test]
     fn focused_matches_by_pid_when_no_string_match() {
         // Wine/Proton scenario: generic binary, no desktop file match, but PIDs match
+        let mock = MockProc::empty();
         let mut focused = make_focused(Some("steam_app_12345"), None, Some("steam_app_12345"));
         focused.pid = Some(9876);
         let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
         si.pid = Some(9876);
-        assert!(sink_input_matches_focused(&si, &focused));
+        assert!(sink_input_matches_focused(
+            &si,
+            &focused,
+            &empty_cache(),
+            &mock
+        ));
     }
 
     #[test]
     fn focused_no_match_when_pids_differ() {
+        let mock = MockProc::empty();
         let mut focused = make_focused(Some("steam_app_12345"), None, None);
         focused.pid = Some(9876);
         let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
         si.pid = Some(5555);
-        assert!(!sink_input_matches_focused(&si, &focused));
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &empty_cache(),
+            &mock
+        ));
     }
 
     #[test]
     fn focused_no_match_when_focused_pid_none() {
+        let mock = MockProc::empty();
         let focused = make_focused(Some("steam_app_12345"), None, None);
         // focused.pid is None
         let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
         si.pid = Some(1234);
-        assert!(!sink_input_matches_focused(&si, &focused));
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &empty_cache(),
+            &mock
+        ));
     }
 
     #[test]
     fn focused_no_match_when_si_pid_none() {
+        let mock = MockProc::empty();
         let mut focused = make_focused(Some("steam_app_12345"), None, None);
         focused.pid = Some(1234);
         let si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
         // si.pid is None
-        assert!(!sink_input_matches_focused(&si, &focused));
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &empty_cache(),
+            &mock
+        ));
     }
 
     #[test]
     fn string_match_still_works_when_pids_differ() {
+        let mock = MockProc::empty();
         let mut focused = make_focused(None, Some("firefox"), None);
         focused.pid = Some(1111);
         let mut si = make_sink_input(1, "Firefox", Some("firefox"), None);
         si.pid = Some(2222);
         // String strategy 2 matches, even though PIDs differ
-        assert!(sink_input_matches_focused(&si, &focused));
+        assert!(sink_input_matches_focused(
+            &si,
+            &focused,
+            &empty_cache(),
+            &mock
+        ));
+    }
+
+    #[test]
+    fn focused_matches_via_pgid() {
+        // Wine/Proton: window PID 100, audio PID 200, same process group 50.
+        let mock = MockProc {
+            pgids: HashMap::from([(100, 50), (200, 50)]),
+            ppids: HashMap::new(),
+        };
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
+    }
+
+    #[test]
+    fn focused_matches_via_sibling() {
+        // Window PID 100 and audio PID 200 share parent PID 50.
+        let mock = MockProc {
+            pgids: HashMap::new(),
+            ppids: HashMap::from([(100, 50), (200, 50)]),
+        };
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
+    }
+
+    #[test]
+    fn pgid_zero_does_not_match() {
+        // PGID 0 is special (kernel) — should not count as a match.
+        let mock = MockProc {
+            pgids: HashMap::from([(100, 0), (200, 0)]),
+            ppids: HashMap::new(),
+        };
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
+    }
+
+    #[test]
+    fn parent_pid_1_does_not_match() {
+        // Parent PID 1 (init/systemd) — too broad, should not count.
+        let mock = MockProc {
+            pgids: HashMap::new(),
+            ppids: HashMap::from([(100, 1), (200, 1)]),
+        };
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
+    }
+
+    #[test]
+    fn different_pgid_does_not_match() {
+        // Different process groups — unrelated apps.
+        let mock = MockProc {
+            pgids: HashMap::from([(100, 50), (200, 60)]),
+            ppids: HashMap::from([(100, 10), (200, 20)]),
+        };
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Other Game", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
+    }
+
+    #[test]
+    fn process_exited_returns_none_no_match() {
+        // Process exited between PID capture and /proc read — lookups return None.
+        let mock = MockProc::empty(); // no entries = "process doesn't exist"
+        let focused_proc = CachedProcInfo::lookup(Some(100), &mock);
+        let mut focused = make_focused(Some("steam_app_12345"), None, None);
+        focused.pid = Some(100);
+        let mut si = make_sink_input(1, "Game Audio", Some("wine64-preloader"), None);
+        si.pid = Some(200);
+        assert!(!sink_input_matches_focused(
+            &si,
+            &focused,
+            &focused_proc,
+            &mock
+        ));
     }
 
     // --- desktop_file_stem / binary_stem helper tests ---
@@ -1250,6 +1565,9 @@ mod tests {
 
     #[test]
     fn focused_matches_via_stem_strategy() {
+        let mock = MockProc::empty();
+        let cache = empty_cache();
+
         // Firefox: reverse-DNS desktop file, binary with -bin suffix, no flatpak_id
         let focused = make_focused(
             Some("org.mozilla.firefox"),
@@ -1257,17 +1575,17 @@ mod tests {
             Some("org.mozilla.firefox"),
         );
         let si = make_sink_input(1, "Firefox", Some("firefox-bin"), None);
-        assert!(sink_input_matches_focused(&si, &focused));
+        assert!(sink_input_matches_focused(&si, &focused, &cache, &mock));
 
         // Ptyxis: case-insensitive stem match
         let focused = make_focused(Some("org.gnome.Ptyxis"), None, None);
         let si = make_sink_input(2, "Ptyxis", Some("ptyxis"), None);
-        assert!(sink_input_matches_focused(&si, &focused));
+        assert!(sink_input_matches_focused(&si, &focused, &cache, &mock));
 
         // VLC: stem match across extension + case difference
         let focused = make_focused(Some("org.videolan.VLC"), None, None);
         let si = make_sink_input(3, "VLC media player", Some("vlc.bin"), None);
-        assert!(sink_input_matches_focused(&si, &focused));
+        assert!(sink_input_matches_focused(&si, &focused, &cache, &mock));
     }
 
     // --- reapply_volumes_to_new_sink_inputs tests ---
