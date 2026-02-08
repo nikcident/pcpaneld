@@ -70,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: pacman -Sy --noconfirm hidapi libpulse dbus systemd-libs gcc pkgconf
+        run: pacman -Syu --noconfirm hidapi libpulse dbus systemd-libs gcc pkgconf
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
