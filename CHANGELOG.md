@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-02-08
+
+### Fixed
+
+- Focused-app slider now works with Wine/Proton games that spawn separate processes for the window and audio stream. Previously only exact PID matching was used (Strategy 6), which failed when the KWin window PID and PulseAudio stream PID differed. Now matches via process group (PGID) and sibling detection (same parent PID) as fallbacks.
+
 ## [0.1.1] - 2026-02-05
 
 ### Added
