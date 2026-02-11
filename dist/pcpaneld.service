@@ -1,12 +1,14 @@
 [Unit]
 Description=PCPanel Pro Daemon
-After=pipewire-pulse.service
+After=pipewire-pulse.service graphical-session.target
 Wants=pipewire-pulse.service
 
 [Service]
 ExecStart=%h/.cargo/bin/pcpaneld daemon
 Restart=on-failure
 RestartSec=2
+# Uncomment for debug logging:
+#Environment=PCPANELD_LOG_LEVEL=debug
 
 [Install]
 WantedBy=default.target

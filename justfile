@@ -45,6 +45,14 @@ install-service:
     install -Dm644 dist/pcpaneld.service ~/.config/systemd/user/pcpaneld.service
     systemctl --user daemon-reload
 
+# Build debug binary, install it, reinstall service, and restart
+deploy:
+    {{cargo_prefix}} cargo build --workspace
+    install -Dm755 target/debug/pcpaneld ~/.cargo/bin/pcpaneld
+    install -Dm644 dist/pcpaneld.service ~/.config/systemd/user/pcpaneld.service
+    systemctl --user daemon-reload
+    systemctl --user restart pcpaneld
+
 deny:
     cargo deny check
 
