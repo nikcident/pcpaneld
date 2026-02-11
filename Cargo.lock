@@ -782,7 +782,7 @@ checksum = "b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec"
 
 [[package]]
 name = "pcpaneld"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "pcpaneld-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "libc",

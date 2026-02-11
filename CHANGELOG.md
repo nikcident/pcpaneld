@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-02-11
+
+### Added
+
+- One-liner install script (`curl | bash`) with systemd service and udev rule setup
+- GitHub Release workflow: builds stripped binary on tag push, validates version against Cargo.toml
+- Install test harness (`tests/test-install.sh`) for verifying installer in disposable containers
+- `just deploy` and `just deploy-debug` recipes for quick iteration
+
+### Fixed
+
+- KWin script loading now retries up to 5 times with linear backoff at login, fixing race condition where KWin wasn't ready yet
+- systemd service orders after `graphical-session.target` to improve boot reliability
+
 ## [0.2.0] - 2026-02-08
 
 ### Fixed

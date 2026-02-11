@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -119,8 +120,26 @@ pub async fn run(focused_tx: watch::Sender<Option<FocusedWindowInfo>>, cancel: C
     };
 
     // Step 3: Load and start the script (cleans up stale registrations first).
-    if let Err(e) = load_kwin_script(&conn, &script_path).await {
-        warn!("failed to load KWin script (focused window tracking disabled): {e}");
+    // KWin may not be ready yet at boot — retry with linear backoff, matching
+    // the tray retry pattern in tray.rs.
+    let mut loaded = false;
+    for attempt in 1..=5u64 {
+        match load_kwin_script(&conn, &script_path).await {
+            Ok(()) => {
+                loaded = true;
+                break;
+            }
+            Err(e) => {
+                if attempt < 5 {
+                    warn!("KWin script load failed (attempt {attempt}/5): {e}");
+                    tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                } else {
+                    warn!("KWin script load failed after {attempt} attempts (focused window tracking disabled): {e}");
+                }
+            }
+        }
+    }
+    if !loaded {
         let _ = std::fs::remove_file(&script_path);
         cancel.cancelled().await;
         return;

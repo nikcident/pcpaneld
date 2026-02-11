@@ -3,6 +3,8 @@ cargo_prefix := env("PCPANELD_CARGO", "")
 
 default: check
 
+# ── Development ─────────────────────────────────────────────
+
 # Lint and format check (no C deps needed, works on host)
 check:
     cargo clippy --workspace -- -D warnings
@@ -22,6 +24,14 @@ release:
     {{cargo_prefix}} cargo build --workspace --release
 
 all: check build test
+
+deny:
+    cargo deny check
+
+clean:
+    cargo clean
+
+# ── Installation ────────────────────────────────────────────
 
 install: install-binaries install-service install-udev
 
@@ -45,24 +55,19 @@ install-service:
     install -Dm644 dist/pcpaneld.service ~/.config/systemd/user/pcpaneld.service
     systemctl --user daemon-reload
 
-deny:
-    cargo deny check
+# ── Dev workflow ────────────────────────────────────────────
 
-# Systemd user service management
-start:
-    systemctl --user start pcpaneld
-
-stop:
-    systemctl --user stop pcpaneld
-
-restart:
+# Build release binary, install, and restart the running daemon
+deploy: release install-service
+    install -Dm755 target/release/pcpaneld ~/.cargo/bin/pcpaneld
     systemctl --user restart pcpaneld
 
-enable:
-    systemctl --user enable pcpaneld
+# Build debug binary, install, and restart (faster builds, slower runtime)
+deploy-debug: build install-service
+    install -Dm755 target/debug/pcpaneld ~/.cargo/bin/pcpaneld
+    systemctl --user restart pcpaneld
 
-disable:
-    systemctl --user disable pcpaneld
+# ── Service ─────────────────────────────────────────────────
 
 status:
     systemctl --user status pcpaneld
@@ -70,8 +75,7 @@ status:
 logs *args='--follow --lines=100':
     journalctl --user-unit pcpaneld {{args}}
 
-clean:
-    cargo clean
+# ── CI ──────────────────────────────────────────────────────
 
 # Run CI workflow locally via act (uses podman)
 act *args='push':
@@ -94,6 +98,8 @@ act-each:
         fi
     done
     exit $failed
+
+# ── Setup ───────────────────────────────────────────────────
 
 # Create a distrobox with build deps (for immutable distros)
 setup:
