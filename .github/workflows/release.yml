@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: >
+          apt-get update && apt-get install -y
+          libhidapi-dev libpulse-dev libdbus-1-dev libsystemd-dev libudev-dev
+          gcc pkg-config curl jq
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Validate version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # Strip pre-release suffix (e.g., 0.3.0-beta → 0.3.0)
+          TAG_BASE="${TAG_VERSION%%-*}"
+          CARGO_VERSION="$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "pcpaneld") | .version')"
+          if [ "$TAG_BASE" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag base version ($TAG_BASE from v$TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "Version: $TAG_VERSION (Cargo.toml: $CARGO_VERSION)"
+
+      - name: Build release binary
+        run: cargo build --workspace --release
+
+      - name: Strip binary
+        run: strip target/release/pcpaneld
+
+      - name: Prepare asset
+        run: cp target/release/pcpaneld pcpaneld-x86_64-unknown-linux-gnu
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: pcpaneld-x86_64-unknown-linux-gnu

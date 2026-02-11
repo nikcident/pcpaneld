@@ -11,6 +11,37 @@ I bought a PCPanel Pro and switched to Linux as my daily driver. The
 official software is Windows-only, and the community version is Java --
 so I wrote a native daemon in Rust.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nikcident/pcpaneld/main/install.sh | bash
+```
+
+To install a specific version (including pre-releases):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nikcident/pcpaneld/main/install.sh | bash -s -- v0.3.0-beta
+```
+
+This downloads a pre-built binary to `~/.local/bin/`, installs a systemd
+user service, and optionally sets up the udev rule for device access.
+
+> `~/.local/bin` must be in your `PATH` (it is by default on most distros).
+
+To build from source instead, see [Building](#building) below.
+
+## Uninstall
+
+```bash
+systemctl --user disable --now pcpaneld
+rm ~/.local/bin/pcpaneld
+rm ~/.config/systemd/user/pcpaneld.service
+systemctl --user daemon-reload
+sudo rm /etc/udev/rules.d/70-pcpanel.rules
+```
+
+Your configuration in `~/.config/pcpaneld/` is intentionally preserved.
+
 ## Features
 
 - **Per-app volume** -- bind a slider to Spotify, a knob to Discord, etc.
