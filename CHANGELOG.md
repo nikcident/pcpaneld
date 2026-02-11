@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - One-liner install script (`curl | bash`) with systemd service and udev rule setup
 - GitHub Release workflow: builds stripped binary on tag push, validates version against Cargo.toml
 - Install test harness (`tests/test-install.sh`) for verifying installer in disposable containers
-- `just deploy` recipe for quick debug build + restart iteration
+- `just deploy` and `just deploy-debug` recipes for quick iteration
 
 ### Fixed
 
