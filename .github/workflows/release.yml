@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: >
+          apt-get update && apt-get install -y
+          libhidapi-dev libpulse-dev libdbus-1-dev libsystemd-dev libudev-dev
+          gcc pkg-config curl jq
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Validate version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          CARGO_VERSION="$(cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | select(.name == "pcpaneld") | .version')"
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version (v$TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "Version: $CARGO_VERSION"
+
+      - name: Build release binary
+        run: cargo build --workspace --release
+
+      - name: Strip binary
+        run: strip target/release/pcpaneld
+
+      - name: Prepare asset
+        run: cp target/release/pcpaneld pcpaneld-x86_64-unknown-linux-gnu
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # gh is not in debian:bookworm, install it
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt-get update && apt-get install -y gh
+          gh release create "$TAG" \
+            --generate-notes \
+            pcpaneld-x86_64-unknown-linux-gnu
