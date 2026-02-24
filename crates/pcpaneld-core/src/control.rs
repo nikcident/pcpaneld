@@ -176,6 +176,23 @@ pub enum AudioTarget {
     FocusedApp,
 }
 
+impl AudioTarget {
+    /// Returns the priority of this target type for deduplication when multiple
+    /// controls match the same sink-input. Higher value wins.
+    ///
+    /// - `App` (2): explicit app matcher, most specific
+    /// - `FocusedApp` (1): whatever is focused, less specific
+    /// - `DefaultOutput`/`DefaultInput` (0): device targets, not applicable to streams
+    #[must_use]
+    pub fn priority(&self) -> u8 {
+        match self {
+            AudioTarget::App { .. } => 2,
+            AudioTarget::FocusedApp => 1,
+            AudioTarget::DefaultOutput | AudioTarget::DefaultInput => 0,
+        }
+    }
+}
+
 impl fmt::Display for AudioTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -586,5 +603,22 @@ mod tests {
         let toml_str = toml_edit::ser::to_string(&w).unwrap();
         let parsed: Wrapper = toml_edit::de::from_str(&toml_str).unwrap();
         assert_eq!(w, parsed);
+    }
+
+    #[test]
+    fn app_target_has_higher_priority_than_focused() {
+        let app = AudioTarget::App {
+            matcher: AppMatcher {
+                binary: Some("firefox".into()),
+                ..Default::default()
+            },
+        };
+        assert!(app.priority() > AudioTarget::FocusedApp.priority());
+    }
+
+    #[test]
+    fn focused_has_higher_priority_than_device_targets() {
+        assert!(AudioTarget::FocusedApp.priority() > AudioTarget::DefaultOutput.priority());
+        assert!(AudioTarget::FocusedApp.priority() > AudioTarget::DefaultInput.priority());
     }
 }
