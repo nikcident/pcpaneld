@@ -355,6 +355,29 @@ async fn reapply_volumes_to_new_sink_inputs(
     audio_cmd_tx: &mpsc::Sender<AudioCommand>,
     focused_window: &Option<FocusedWindowInfo>,
 ) {
+    // Phase 1: Collect best match per sink-input index (highest priority wins).
+    // Value: (volume, priority, channels)
+    let mut best: HashMap<u32, (Volume, u8, u8)> = HashMap::new();
+
+    let mut record_match = |si: &SinkInputInfo, volume: Volume, priority: u8| {
+        best.entry(si.index)
+            .and_modify(|existing| {
+                if priority > existing.1 {
+                    debug!(
+                        "sink-input {} (index {}): priority {} supersedes previous priority {}",
+                        si.name, si.index, priority, existing.1
+                    );
+                    *existing = (volume, priority, si.channels);
+                } else {
+                    debug!(
+                        "sink-input {} (index {}): skipping priority {} (already have {})",
+                        si.name, si.index, priority, existing.1
+                    );
+                }
+            })
+            .or_insert((volume, priority, si.channels));
+    };
+
     for analog_id in 0..ControlId::NUM_ANALOG {
         let volume = match last_applied_volumes[analog_id as usize] {
             Some(v) => v,
@@ -378,25 +401,13 @@ async fn reapply_volumes_to_new_sink_inputs(
             DialAction::Volume { target } => target,
         };
 
+        let priority = target.priority();
+
         match target {
             AudioTarget::App { matcher } => {
                 for si in new_sink_inputs {
                     if matcher.matches(&AppProperties::from(*si)) {
-                        debug!(
-                            "re-applying volume {:.2} to new sink-input {} (index {})",
-                            volume.get(),
-                            si.name,
-                            si.index
-                        );
-                        send_audio(
-                            audio_cmd_tx,
-                            AudioCommand::SinkInputVolume {
-                                index: si.index,
-                                volume,
-                                channels: si.channels,
-                            },
-                        )
-                        .await;
+                        record_match(si, volume, priority);
                     }
                 }
             }
@@ -405,21 +416,7 @@ async fn reapply_volumes_to_new_sink_inputs(
                     let focused_proc = CachedProcInfo::lookup(focused.pid, &RealProc);
                     for si in new_sink_inputs {
                         if sink_input_matches_focused(si, focused, &focused_proc, &RealProc) {
-                            debug!(
-                                "re-applying volume {:.2} to new focused sink-input {} (index {})",
-                                volume.get(),
-                                si.name,
-                                si.index
-                            );
-                            send_audio(
-                                audio_cmd_tx,
-                                AudioCommand::SinkInputVolume {
-                                    index: si.index,
-                                    volume,
-                                    channels: si.channels,
-                                },
-                            )
-                            .await;
+                            record_match(si, volume, priority);
                         }
                     }
                 }
@@ -427,6 +424,24 @@ async fn reapply_volumes_to_new_sink_inputs(
             // DefaultOutput/DefaultInput target devices, not sink-inputs
             AudioTarget::DefaultOutput | AudioTarget::DefaultInput => {}
         }
+    }
+
+    // Phase 2: Send one command per sink-input.
+    for (index, (volume, _priority, channels)) in &best {
+        debug!(
+            "re-applying volume {:.2} to sink-input index {}",
+            volume.get(),
+            index
+        );
+        send_audio(
+            audio_cmd_tx,
+            AudioCommand::SinkInputVolume {
+                index: *index,
+                volume: *volume,
+                channels: *channels,
+            },
+        )
+        .await;
     }
 }
 
@@ -1797,6 +1812,128 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no commands should be sent when there are no new sink-inputs"
+        );
+    }
+
+    #[tokio::test]
+    async fn reapply_explicit_app_wins_over_focused_app() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let si = make_sink_input(42, "Firefox", Some("firefox"), None);
+        let new_inputs = vec![&si];
+        let mut volumes: [Option<Volume>; 9] = [None; 9];
+        // Knob 0 (analog_id=0): explicit App matcher for Firefox at 0.3
+        volumes[0] = Some(Volume::new(0.3));
+        // Slider 0 (analog_id=5): FocusedApp at 0.8
+        volumes[5] = Some(Volume::new(0.8));
+
+        let mut config = Config::default();
+        config.set_control(
+            ControlId::Knob(0),
+            ControlConfig {
+                dial: Some(DialAction::Volume {
+                    target: AudioTarget::App {
+                        matcher: AppMatcher {
+                            binary: Some("firefox".into()),
+                            ..Default::default()
+                        },
+                    },
+                }),
+                button: None,
+            },
+        );
+        config.set_control(
+            ControlId::Slider(0),
+            ControlConfig {
+                dial: Some(DialAction::Volume {
+                    target: AudioTarget::FocusedApp,
+                }),
+                button: None,
+            },
+        );
+
+        // Firefox is focused, so both controls match the same sink-input
+        let focused = Some(make_focused(None, Some("firefox"), None));
+        reapply_volumes_to_new_sink_inputs(&new_inputs, &volumes, &config, &tx, &focused).await;
+
+        // Should get exactly one command with the App volume (0.3), not FocusedApp (0.8)
+        let cmd = rx.try_recv().expect("expected a volume command");
+        match cmd {
+            AudioCommand::SinkInputVolume { index, volume, .. } => {
+                assert_eq!(index, 42);
+                assert!(
+                    (volume.get() - 0.3).abs() < f64::EPSILON,
+                    "explicit App matcher should win over FocusedApp, got {}",
+                    volume.get()
+                );
+            }
+            other => panic!("expected SinkInputVolume, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "should send exactly one command per sink-input"
+        );
+    }
+
+    #[tokio::test]
+    async fn reapply_same_priority_first_match_wins() {
+        let (tx, mut rx) = mpsc::channel(16);
+        // Sink-input with binary "firefox-nightly"
+        let si = make_sink_input(42, "Firefox Nightly", Some("firefox-nightly"), None);
+        let new_inputs = vec![&si];
+        let mut volumes: [Option<Volume>; 9] = [None; 9];
+        // Knob 0 (analog_id=0): App matcher "firefox" (substring matches "firefox-nightly")
+        volumes[0] = Some(Volume::new(0.2));
+        // Knob 1 (analog_id=1): App matcher "nightly" (also substring matches "firefox-nightly")
+        volumes[1] = Some(Volume::new(0.9));
+
+        let mut config = Config::default();
+        config.set_control(
+            ControlId::Knob(0),
+            ControlConfig {
+                dial: Some(DialAction::Volume {
+                    target: AudioTarget::App {
+                        matcher: AppMatcher {
+                            binary: Some("firefox".into()),
+                            ..Default::default()
+                        },
+                    },
+                }),
+                button: None,
+            },
+        );
+        config.set_control(
+            ControlId::Knob(1),
+            ControlConfig {
+                dial: Some(DialAction::Volume {
+                    target: AudioTarget::App {
+                        matcher: AppMatcher {
+                            binary: Some("nightly".into()),
+                            ..Default::default()
+                        },
+                    },
+                }),
+                button: None,
+            },
+        );
+
+        reapply_volumes_to_new_sink_inputs(&new_inputs, &volumes, &config, &tx, &None).await;
+
+        // Both have App priority (2). First processed (knob 0, analog_id=0) wins.
+        let cmd = rx.try_recv().expect("expected a volume command");
+        match cmd {
+            AudioCommand::SinkInputVolume { index, volume, .. } => {
+                assert_eq!(index, 42);
+                assert!(
+                    (volume.get() - 0.2).abs() < f64::EPSILON,
+                    "first same-priority match should win, got {}",
+                    volume.get()
+                );
+            }
+            other => panic!("expected SinkInputVolume, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "should send exactly one command per sink-input"
         );
     }
 
